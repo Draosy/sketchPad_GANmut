@@ -1,3 +1,4 @@
+pillow
 cmake
 dlib
 matplotlib
@@ -5,4 +6,7 @@ numpy
 tqdm
 opencv-python
 tensorflow
-
+torch
+torchvision
+numpy
+imutils
