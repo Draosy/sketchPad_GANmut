@@ -17,6 +17,7 @@ import tempfile
 import traceback
 import io
 import base64
+import math
 from PIL import Image
 
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,16 +29,23 @@ class SketchPadModel:
         """
         Initialize model, loads into memory only when backend starts, not per request
         """
-        weights_path = os.path.join(
+        lin_weights_path = os.path.join(
             CURR_DIR,
             'learned_generators',
             'lin_2d',
             '1000000-G.ckpt'
         )
+        gaus_weights_path = os.path.join(
+            CURR_DIR,
+            'learned_generators',
+            'gaus_2d',
+            '1800000-G.ckpt'
+        )
         old_stdout = sys.stdout
         sys.stdout = sys.stderr
         try:
-            self.G = GANmut(G_path=weights_path, model='linear')
+            self.G_linear = GANmut(G_path=lin_weights_path, model='linear')
+            self.G_gaussian = GANmut(G_path=gaus_weights_path, model='gaussian')
         finally:
             sys.stdout = old_stdout
     def process(self, image: Image.Image | None, prompt: str) -> dict:
@@ -59,7 +67,8 @@ class SketchPadModel:
                     "text": "No image. Please upload an image with a face.",
                     "image": None
                 }
-            theta, rho = self._parse_prompt(prompt)
+            theta, rho, model_type, x_val, y_val = self._parse_prompt(prompt)
+            active_G = self.G_gaussian if model_type == 'gaussian' else self.G_linear
 
             # set up temporary directory
 
@@ -80,7 +89,17 @@ class SketchPadModel:
 
                 try:
                     # GANmut inference
-                    self.G.emotion_edit(img_path=input_path, theta=theta, rho=rho, save=True)
+                    if model_type == 'gaussian':
+                        # Convert Theta (degrees) to Radians for math functions
+                        if x_val is None or y_val is None:
+                            rad = math.radians(theta)
+                            x_val = rho * math.cos(rad)
+                            y_val = rho * math.sin(rad)
+                        # Call with x and y
+                        active_G.emotion_edit(img_path=input_path, x=x_val, y=y_val, save=True)
+                    else:
+                        # Call with original theta and rho for linear
+                        active_G.emotion_edit(img_path=input_path, theta=theta, rho=rho, save=True)
                 except Exception as inner_e:
                     sys.stderr.write(f"GANmut Error: {str(inner_e)}\n")
                     return {
@@ -111,29 +130,43 @@ class SketchPadModel:
                 result_image = Image.open(actual_output_path).copy()
                 result_image.load()
 
-                return {
-                    "text": f"Applied theta={theta}, rho={rho}.",
+                if model_type == 'gaussian':
+                    return {
+                    "text": f"Applied {model_type} model with x={x_val}, y={y_val}.",
                     "image": result_image
-                }
+                    }
+                else:
+                    return {
+                        "text": f"Applied {model_type} model with theta={theta}, rho={rho}.",
+                        "image": result_image
+                    }
         except Exception as e:
             sys.stderr.write(f"CRASH: {str(e)}\n")
             return {
                 "text": f"Backend Crash: {str(e)}",
                 "image": None
             }
-    def _parse_prompt(self, prompt: str) -> tuple[float, float]:
+    def _parse_prompt(self, prompt: str) -> tuple[float, float, str]:
         """
-        Extract theta (angle) and rho (intensity/strength) from prompt.
+        Extract theta (angle), rho (intensity/strength), and model type from prompt.
         """
+        prompt_lower = prompt.lower()
         # can be theta=, angle=, rho=, strength=
-        theta_match = re.search(r'(?:theta|angle)[=:]\s*(-?\d*\.?\d+)', prompt.lower())
-        rho_match = re.search(r'(?:rho|strength|intensity)[=:]\s*(-?\d*\.?\d+)', prompt.lower())
+        theta_match = re.search(r'(?:theta|angle)[=:]\s*(-?\d*\.?\d+)', prompt_lower)
+        rho_match = re.search(r'(?:rho|strength|intensity)[=:]\s*(-?\d*\.?\d+)', prompt_lower)
+        model_match = re.search(r'(?:model|type)[=:]\s*(linear|gaussian)', prompt_lower)
 
+        x_match = re.search(r'\bx[=:]\s*(-?\d*\.?\d+)', prompt_lower)
+        y_match = re.search(r'\by[=:]\s*(-?\d*\.?\d+)', prompt_lower)
         # default to 0 angle, 0 strength (neutral face)
         theta_val = float(theta_match.group(1)) if theta_match else 0.0
         rho_val = float(rho_match.group(1)) if rho_match else 0.0
+        model_type = model_match.group(1) if model_match else 'linear'
+
+        x_val = float(x_match.group(1)) if x_match else None
+        y_val = float(y_match.group(1)) if y_match else None
 
         # rho must be between 0.0 and 1.0
         rho_val = max(0.0, min(1.0, rho_val))
 
-        return theta_val, rho_val
+        return theta_val, rho_val, model_type, x_val, y_val
